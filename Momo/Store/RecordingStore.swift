@@ -32,6 +32,12 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
     private var procObs: [ProcObservation] = []
     private var tickCount = 0
 
+    /// Minute (1m bucket start) of the most recently flushed 1s bucket. The rollup cascade is
+    /// driven event-driven on coarser-boundary completion (KTD2) — it runs only when a flush
+    /// crosses into a new minute (a 1m bucket has just sealed), NOT on every 1s flush. Running
+    /// the full `catchUp` scan every second is O(rows)/sec and was the U6 smoke-test timeout.
+    private var lastFlushedMinute: Int?
+
     // Clock guard companions (KTD2).
     private var lastWallTs: Int?
     private var lastMono: UInt64?
@@ -142,9 +148,16 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
                     try RowStore.upsert(p, into: Tier.s1.procTable!, db)
                 }
             }
-            // Cascade is event-driven on bucket-boundary completion (separate transactions).
-            try Rollup.catchUp(dbPool, now: now)
-            try checkpoint()
+            // Cascade is event-driven on coarser-boundary completion (KTD2): only when this
+            // flush crosses into a new minute (the prior minute's 1s buckets are all sealed).
+            // catchUp then rolls every sealed coarser bucket (handles multi-minute gaps too)
+            // and is idempotent, so the once-per-minute cadence loses nothing.
+            let minute = bucketStart(ts, bucketSeconds: Tier.m1.bucketSeconds)
+            if let last = lastFlushedMinute, minute != last {
+                try Rollup.catchUp(dbPool, now: now)
+                try checkpoint()
+            }
+            lastFlushedMinute = minute
         } catch {
             // A write failure must not crash ingest; the next flush re-attempts. (A torn row
             // is impossible — the write is a single transaction.)
