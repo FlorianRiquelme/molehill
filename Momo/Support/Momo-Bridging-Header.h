@@ -25,21 +25,29 @@
 
 // --- Group 2: private IOHIDEventSystemClient API -----------------------------
 // Apple Silicon temperature/fan sensors live behind AppleVendor HID services
-// (PrimaryUsagePage 0xff00 / PrimaryUsage 0x0005). These opaque refs and
-// functions are stable-in-practice but undocumented.
+// (PrimaryUsagePage 0xff00 / PrimaryUsage 0x0005). These functions are
+// stable-in-practice but undocumented.
+//
+// macOS 26 reality: the SDK now ships public `hidsystem/IOHIDEventSystemClient.h`
+// and `hidsystem/IOHIDServiceClient.h` that declare the opaque `*Ref` types as
+// CF-bridged objects (so Swift manages their lifetime) plus a subset of the
+// functions (`IOHIDEventSystemClientCopyServices`, `IOHIDServiceClientCopyProperty`).
+// We include those headers so the *types* come from the SDK (single source of truth
+// — re-typedef'ing them would make Swift mis-bridge create/copy memory rules), and
+// hand-declare only the symbols the SDK still omits.
+
+#include <IOKit/hidsystem/IOHIDEventSystemClient.h>  // IOHIDEventSystemClientRef (CF-bridged), CopyServices, CopyProperty
+#include <IOKit/hidsystem/IOHIDServiceClient.h>       // IOHIDServiceClientRef (CF-bridged)
 
 typedef struct __IOHIDEvent *IOHIDEventRef;
-typedef struct __IOHIDServiceClient *IOHIDServiceClientRef;
-typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+// Still private (not in any SDK header):
 IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
 int IOHIDEventSystemClientSetMatching(IOHIDEventSystemClientRef client, CFDictionaryRef match);
-CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef client);
-CFTypeRef IOHIDServiceClientCopyProperty(IOHIDServiceClientRef service, CFStringRef key);
 IOHIDEventRef IOHIDServiceClientCopyEvent(IOHIDServiceClientRef service,
                                           int64_t type,
                                           int32_t options,
@@ -49,6 +57,10 @@ double IOHIDEventGetFloatValue(IOHIDEventRef event, int32_t field);
 #ifdef __cplusplus
 }
 #endif
+
+// Swift does not import function-like C macros, so expose the field-base computation
+// as a static inline function the Swift side can call directly.
+static inline int32_t MomoIOHIDEventFieldBase(int32_t type) { return type << 16; }
 
 // HID event-type constants and the field-base macro. Not in any public SDK header.
 #ifndef kIOHIDEventTypeTemperature
