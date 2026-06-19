@@ -12,26 +12,14 @@ import SwiftUI
 struct MomoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    private var services: MomoServices { MomoServices.shared }
+
     var body: some Scene {
-        MenuBarExtra("Momo", systemImage: "gauge") {
-            MenuBarContentView()
+        MenuBarExtra {
+            ReadoutPanel(live: services.live, selection: services.selection)
+        } label: {
+            MenuBarLabel(live: services.live, selection: services.selection)
         }
         .menuBarExtraStyle(.window)
-    }
-}
-
-/// Placeholder menu-bar panel for U1. Replaced by the live readout (U7) and the
-/// metric drill-down (U8).
-private struct MenuBarContentView: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Momo")
-                .font(.headline)
-            Text("System monitor — scaffold")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding()
-        .frame(width: 220, alignment: .leading)
     }
 }

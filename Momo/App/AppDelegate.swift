@@ -21,6 +21,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Belt-and-suspenders with LSUIElement: guarantee accessory mode (no Dock icon).
         NSApp.setActivationPolicy(.accessory)
         observeSystemSleep()
+
+        // Don't spin up the live pipeline (governor timer + DB writes) when the app is launched
+        // only as the unit-test host.
+        guard NSClassFromString("XCTestCase") == nil else { return }
+
+        let services = MomoServices.shared
+        // Route the sleep/wake observers into the governor's cadence state machine (KTD3).
+        onWillSleep = { services.governor.systemWillSleep() }
+        onDidWake = { services.governor.systemDidWake() }
+        onScreensDidSleep = { services.governor.screensDidSleep() }
+        onScreensDidWake = { services.governor.screensDidWake() }
+        services.start()
+    }
+
+    /// Graceful-exit durability flush (KTD2: ≤1 finest bucket lost on SIGKILL; this covers the
+    /// graceful path).
+    func applicationWillTerminate(_ notification: Notification) {
+        guard NSClassFromString("XCTestCase") == nil else { return }
+        MomoServices.shared.flush()
     }
 
     /// Observe the four sleep/wake notifications (pattern: MacSlowCooker
