@@ -14,6 +14,9 @@
 //
 import Foundation
 import GRDB
+import os
+
+private let storeLog = Logger(subsystem: "com.florianriquelme.momo", category: "store")
 
 final class RecordingStore: SampleReceiver, @unchecked Sendable {
     let dbPool: DatabasePool
@@ -99,9 +102,11 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
             effectiveTs = bucketTs ?? wallTs
         case .authoritativeReset:
             // Sustained backward correction: seal the pre-jump tail, then treat the
-            // corrected stream as authoritative (overwrite now-incorrect future buckets).
+            // corrected stream as authoritative. Clear the buffer so the rollover branch below
+            // doesn't re-flush the just-sealed (now stale future-dated) bucket a second time —
+            // it falls through to the `bucketTs == nil` reset and re-bases on the corrected ts.
             flushCurrentLocked()
-            // Reset companions so subsequent samples key on the corrected stream.
+            bucketTs = nil
         }
 
         let tickBucket = bucketStart(effectiveTs, bucketSeconds: Tier.s1.bucketSeconds)
@@ -142,10 +147,11 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
         let now = lastWallTs ?? ts
 
         do {
+            guard let procTable = Tier.s1.procTable else { return }  // s1 always has a proc table
             try dbPool.write { db in
                 try RowStore.upsert(scalar, into: Tier.s1.table, db)
                 for p in procs {
-                    try RowStore.upsert(p, into: Tier.s1.procTable!, db)
+                    try RowStore.upsert(p, into: procTable, db)
                 }
             }
             // Cascade is event-driven on coarser-boundary completion (KTD2): only when this
@@ -160,7 +166,9 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
             lastFlushedMinute = minute
         } catch {
             // A write failure must not crash ingest; the next flush re-attempts. (A torn row
-            // is impossible — the write is a single transaction.)
+            // is impossible — the write is a single transaction.) Log so a persistent failure
+            // (disk full, corrupt WAL) is at least observable rather than silently lossy.
+            storeLog.error("flush failed at bucket \(ts): \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -184,7 +192,7 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
     private func checkpoint() throws {
         // A blocked checkpoint (open reader) is fine; it retries on the next flush, so the
         // PRAGMA itself is best-effort (`try?`).
-        try dbPool.writeWithoutTransaction { db in
+        dbPool.writeWithoutTransaction { db in
             _ = try? db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
         }
     }

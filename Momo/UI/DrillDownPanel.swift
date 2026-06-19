@@ -82,10 +82,10 @@ enum DrillTarget: String, CaseIterable, Identifiable {
             return (avg, r.cpuMax)
         case .memory:
             // Fraction used = used / total, mirroring MetricFormat.usedFraction on the live path.
+            // Clamp to <=1.0 so the MAX overlay can't clip against the chart's 0...1 domain.
             guard let total = r.memTotal, total > 0 else { return nil }
-            let avg = r.memUsedAvg.map { $0 / total }
-            guard let avg else { return nil }
-            return (avg, r.memUsedMax.map { $0 / total })
+            guard let avg = r.memUsedAvg.map({ min($0 / total, 1.0) }) else { return nil }
+            return (avg, r.memUsedMax.map { min($0 / total, 1.0) })
         case .disk:
             // Combined throughput = read + write. AVG is sum of AVGs; MAX is sum of MAXes (an
             // upper bound on combined throughput — read and write peaks may not coincide).
@@ -352,14 +352,16 @@ struct MomoPanel: View {
         // U11: resolve the selected point's culprits whenever the selection, target, or
         // viewTime changes (live = synchronous off the ring; historical = off-main DB read).
         .task(id: culpritTaskKey) { await loadCulprit() }
-        // Switching target/timebase invalidates a selection from the old context.
-        .onChange(of: target) { _, _ in selectedTime = nil; culprit = nil }
+        // Switching target invalidates a selection from the old context AND re-scopes which
+        // detail collectors run (governor stays DetailVisible across scrub — reading history is
+        // independent of live collection cadence, KTD12 / U10 governor note).
+        .onChange(of: target) { _, newTarget in
+            selectedTime = nil; culprit = nil
+            setDetailVisible(true, newTarget.visibleMetrics)
+        }
         .onChange(of: viewTime) { _, _ in selectedTime = nil; culprit = nil }
         .onAppear { setDetailVisible(true, target.visibleMetrics) }
         .onDisappear { setDetailVisible(false, []) }
-        // Governor stays DetailVisible across scrub (reading history is independent of live
-        // collection cadence — KTD12 / U10 governor note).
-        .onChange(of: target) { _, newTarget in setDetailVisible(true, newTarget.visibleMetrics) }
     }
 
     /// Re-runs the historical `.task` when the cursor date or target changes. `.live` keys to a

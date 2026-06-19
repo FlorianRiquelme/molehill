@@ -73,6 +73,16 @@ final class PowerContext: PowerContextProtocol, @unchecked Sendable {
         installPowerSourceObserver()
     }
 
+    deinit {
+        // Safe for the singleton (app lifetime), but make the invariant explicit so a future
+        // non-singleton use (e.g. a unit test constructing PowerContext) doesn't fire the IOPS
+        // callback against a freed pointer.
+        if let source = powerSourceRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
+        }
+        NotificationCenter.default.removeObserver(self)
+    }
+
     func snapshot() -> PowerSnapshot { state.withLock { $0 } }
 
     func updateSleepState(asleep: Bool) {

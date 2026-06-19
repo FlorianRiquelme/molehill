@@ -78,6 +78,10 @@ final class HIDSensorReader: HIDBackend {
             guard let event = IOHIDServiceClientCopyEvent(
                 service, Int64(kIOHIDEventTypeTemperature), 0, 0
             ) else { continue }
+            // IOHIDServiceClientCopyEvent follows the CF Copy rule (caller owns), but the
+            // returned IOHIDEventRef is a raw OpaquePointer (not CF-bridged), so ARC won't
+            // release it. Balance the +1 retain explicitly or we leak one per service per tick.
+            defer { Unmanaged<AnyObject>.fromOpaque(UnsafeRawPointer(event)).release() }
 
             let raw = IOHIDEventGetFloatValue(event, field)
             let product = (IOHIDServiceClientCopyProperty(service, "Product" as CFString) as? String) ?? "Unknown"

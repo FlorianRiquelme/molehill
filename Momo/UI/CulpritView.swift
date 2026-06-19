@@ -249,11 +249,15 @@ struct CulpritView: View {
         }
     }
 
-    private var timeString: String {
+    private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateStyle = .none
         f.timeStyle = .medium
-        return f.string(from: selected)
+        return f
+    }()
+
+    private var timeString: String {
+        Self.timeFormatter.string(from: selected)
     }
 
     private func aggregate(_ name: String, _ value: Double) -> some View {

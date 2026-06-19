@@ -334,6 +334,7 @@ final class PollingGovernor: @unchecked Sendable {
     func screensDidSleep() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.power.updateSleepState(asleep: true)   // keep the power snapshot in sync (R6 correlated state)
             self.context.asleep = true
             self.applyPlan()
         }
@@ -345,6 +346,7 @@ final class PollingGovernor: @unchecked Sendable {
     func screensDidWake() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.power.updateSleepState(asleep: false)
             self.context.asleep = false
             self.resetCollectors()
             self.applyPlan()

@@ -67,6 +67,8 @@ final class SensorProbe {
     private let backend: SensorReadingBackend
     /// Resolved once at launch and reused — the available set does not change per tick.
     private(set) var capability: SensorCapability
+    /// key -> friendly label, built once (the catalog/platform never change at runtime).
+    private let labels: [String: String]
 
     /// Test/governor entry point: inject a backend + platform. The intersection runs once
     /// here so `capability` is ready before any tick is read (U5 drops pre-probe ticks).
@@ -74,6 +76,7 @@ final class SensorProbe {
         self.platform = platform
         self.backend = backend
         self.capability = SensorProbe.resolve(platform: platform, backend: backend)
+        self.labels = SensorProbe.labelIndex(for: platform)
     }
 
     /// Pure intersection: (platform-filtered catalog) ∩ (keys that read back). Static and
@@ -105,7 +108,6 @@ final class SensorProbe {
         // Re-snapshot the live service set so cached-backend readings (HID) aren't stale; the
         // available *set* is fixed at probe time, only the values refresh.
         backend.refresh()
-        let labels = labelIndex(for: platform)
 
         var temperatures: [SensorReading] = []
         for key in capability.availableTemperatureKeys {
@@ -122,7 +124,7 @@ final class SensorProbe {
         return SensorSample(temperatures: temperatures, fans: fans, thermalState: thermalState)
     }
 
-    private func labelIndex(for platform: SensorPlatform) -> [String: String] {
+    private static func labelIndex(for platform: SensorPlatform) -> [String: String] {
         Dictionary(SensorCatalog.candidates(for: platform).map { ($0.key, $0.label) },
                    uniquingKeysWith: { first, _ in first })
     }
@@ -165,10 +167,6 @@ func mapThermalState(_ state: ProcessInfo.ThermalState) -> SensorSample.ThermalS
     @unknown default: return .nominal
     }
 }
-
-/// Darwin notification name for the finer-grained thermal-pressure signal. Captured here
-/// for later wiring (U5 governor); not observed in U3.
-let thermalPressureNotificationName = "com.apple.system.thermalpressurelevel"
 
 // MARK: - Live backends (wrap the SMC/HID readers behind the injectable surface)
 

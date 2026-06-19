@@ -106,6 +106,14 @@ enum Rollup {
         // process present in only some finer buckets is correctly diluted. For full buckets
         // this equals the tick-weighted mean; partial finer buckets differ only to rounding,
         // matching the scalar rollup policy. `value_max` = max of the finer `value_max`.
+        //
+        // KNOWN LIMITATION (see Residual Review Findings): per-process attribution runs on a
+        // slower sub-cadence than the scalar metrics (KTD3), so at detail cadence only ~1/N of
+        // the finer sub-buckets carry proc rows. Dividing by the full `subBuckets` count
+        // therefore deflates a sustained process's `value` by the sub-cadence factor N. The
+        // ranking is preserved (uniform scaling) and `value_max` is exact; the correct fix
+        // (dividing by the attribution-sample count) needs that count recorded per bucket and is
+        // deferred so the irreversible schema decision isn't rushed.
         struct Key: Hashable { let subsystem: String; let pid: Int64; let name: String }
         var sums: [Key: Double] = [:]
         var peaks: [Key: Double] = [:]
@@ -138,6 +146,7 @@ enum Rollup {
     static func prune(_ db: Database, tier: Tier, now: Int) throws -> Int {
         let horizon = now - tier.retentionSeconds
         var totalDeleted = 0
+        var lastUpper = Int.min
         while true {
             // Find a bounded ts ceiling: the pruneBatchLimit-th oldest ts below horizon.
             let batchTss = try Int.fetchAll(db,
@@ -145,6 +154,11 @@ enum Rollup {
                 arguments: [horizon, pruneBatchLimit])
             guard let lastTs = batchTss.last else { break }
             let upper = lastTs + 1   // inclusive of lastTs
+            // Zero-progress guard: each batch must advance the deleted ceiling. If a DELETE
+            // is silently no-op'd (constraint/trigger), `upper` wouldn't move — break rather
+            // than loop forever holding the writer lock.
+            guard upper > lastUpper else { break }
+            lastUpper = upper
 
             try db.execute(
                 sql: "DELETE FROM \(tier.table) WHERE ts < ?", arguments: [upper])
@@ -210,18 +224,18 @@ enum ClockGuard {
         lastTs: Int?, sampleTs: Int,
         lastMono: UInt64?, sampleMono: UInt64
     ) -> Decision {
-        guard let lastTs, let lastMono else { return .accept }
+        // `lastMono` non-nil marks "we have a prior sample"; its value isn't compared (see below).
+        guard let lastTs, lastMono != nil else { return .accept }
         if sampleTs >= lastTs { return .accept }   // forward or same — normal
 
         let backwardBy = lastTs - sampleTs
         if backwardBy < slewThresholdSeconds {
             return .rejectSlew
         }
-        // Backward by >= one bucket. Confirm via the monotonic clock that real time kept
-        // advancing (so this is a wall-clock correction, not a genuine replay): mono should
-        // be >= lastMono. (If mono also went backward, something is deeply wrong; treat the
-        // corrected wall stream as authoritative regardless — the wall clock is what we key on.)
-        _ = sampleMono >= lastMono
+        // Backward by >= one bucket. The monotonic companion would confirm real time kept
+        // advancing (a wall-clock correction, not a replay), but the decision is the same
+        // either way: the corrected wall stream is authoritative — the wall clock is what we
+        // bucket on (KTD2). The mono direction is intentionally not branched here.
         return .authoritativeReset
     }
 }
