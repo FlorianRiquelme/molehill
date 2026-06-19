@@ -41,6 +41,9 @@ enum CollectorError: Error, Equatable {
     case ioKit(detail: String)
     /// A `sysctl` / `sysctlbyname` call failed (`errno` captured).
     case sysctl(name: String, errno: Int32)
-    /// The kernel returned a reply whose shape/size did not match what we read.
+    /// A libproc call (`proc_listpids` / `proc_pidinfo` / `proc_pid_rusage`) failed.
+    case libproc(api: String, errno: Int32)
+    /// The kernel returned a reply whose shape/size did not match what we read — or a pinned
+    /// struct stride drifted from its known-good baseline (KTD5 layout guard).
     case malformedReply(detail: String)
 }
