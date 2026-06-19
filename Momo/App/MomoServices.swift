@@ -19,6 +19,9 @@ final class MomoServices {
     let power: PowerContext
     let store: RecordingStore?
     let governor: PollingGovernor
+    /// Resolved sensor set (immutable Sendable value), for the "N of M available" UI (OQ6).
+    /// nil when no sensor backend resolved on this machine.
+    let sensorCapability: SensorCapability?
 
     private var started = false
 
@@ -43,6 +46,9 @@ final class MomoServices {
         sink.register(ring)
         if let store { sink.register(store) }
 
+        let probe = Self.makeSensorProbe()
+        self.sensorCapability = probe?.capability
+
         self.governor = PollingGovernor(
             sink: sink,
             power: power,
@@ -51,7 +57,7 @@ final class MomoServices {
             disk: DiskCollector(),
             network: NetworkCollector(),
             attribution: attribution,
-            sensorProbe: Self.makeSensorProbe()
+            sensorProbe: probe
         )
         governor.onWake = { [weak store] in try? store?.runCatchUp() }
     }

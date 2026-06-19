@@ -25,6 +25,14 @@ protocol SensorReadingBackend {
     /// Read the current RPM for a fan candidate `key`. nil = fan absent (fanless / fewer
     /// fans than candidates) — yields no fan entry, never a zero-RPM fan.
     func readFan(key: String) -> Double?
+    /// Re-snapshot any cached service set so the next reads reflect the live machine. The HID
+    /// backend caches its service snapshot per probe; the SMC backend reads live each call, so
+    /// this is a no-op there (default).
+    func refresh()
+}
+
+extension SensorReadingBackend {
+    func refresh() {}
 }
 
 // MARK: - Probe result
@@ -94,6 +102,9 @@ final class SensorProbe {
     /// never represented (no zero), satisfying R12 at the value level too. The label comes
     /// from the catalog; the thermal state is the coarse public marker (see below).
     func read(thermalState: SensorSample.ThermalState = currentThermalState()) -> SensorSample {
+        // Re-snapshot the live service set so cached-backend readings (HID) aren't stale; the
+        // available *set* is fixed at probe time, only the values refresh.
+        backend.refresh()
         let labels = labelIndex(for: platform)
 
         var temperatures: [SensorReading] = []

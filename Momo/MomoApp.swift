@@ -16,7 +16,9 @@ struct MomoApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            ReadoutPanel(live: services.live, selection: services.selection)
+            MomoPanel(live: services.live,
+                      selection: services.selection,
+                      sensorCapability: services.sensorCapability)
         } label: {
             MenuBarLabel(live: services.live, selection: services.selection)
         }
