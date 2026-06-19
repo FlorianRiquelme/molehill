@@ -283,6 +283,12 @@ struct MomoPanel: View {
     @State private var historical: HistoricalResolver.Resolution?
     /// Leading X of the chart's visible scroll window (drives `chartScrollPosition`).
     @State private var scrollPosition: Date = .distantPast
+    /// U11: the point selected on the graph (`chartXSelection`). nil = nothing selected; the
+    /// detail body shows the normal scalar detail. When set, the panel resolves and shows the
+    /// responsible processes for that moment (R9 causal drill-down).
+    @State private var selectedTime: Date?
+    /// Resolved culprits for `selectedTime` (loaded off-main for the historical read).
+    @State private var culprit: CulpritResult?
 
     private var targets: [DrillTarget] {
         // Offer Sensors only if the machine exposes any (R12 — never an empty/zeroed tab).
@@ -314,7 +320,8 @@ struct MomoPanel: View {
                         unit: target.unit,
                         yDomainUpperBound: target == .cpu || target == .memory ? 1.0 : nil,
                         scrubVisibleSeconds: isHistorical ? HistoricalResolver.defaultWindow : nil,
-                        scrollPosition: $scrollPosition)
+                        scrollPosition: $scrollPosition,
+                        selection: $selectedTime)
 
             // Scrubber timeline (OQ4) — only when scrub-back is available and a window resolved.
             if scrubAvailable, let frame = historical?.frame {
@@ -342,6 +349,12 @@ struct MomoPanel: View {
         .frame(width: 320, alignment: .leading)
         // Resolve historical state off-main whenever the cursor/target changes (DB read).
         .task(id: historyTaskKey) { await loadHistorical() }
+        // U11: resolve the selected point's culprits whenever the selection, target, or
+        // viewTime changes (live = synchronous off the ring; historical = off-main DB read).
+        .task(id: culpritTaskKey) { await loadCulprit() }
+        // Switching target/timebase invalidates a selection from the old context.
+        .onChange(of: target) { _, _ in selectedTime = nil; culprit = nil }
+        .onChange(of: viewTime) { _, _ in selectedTime = nil; culprit = nil }
         .onAppear { setDetailVisible(true, target.visibleMetrics) }
         .onDisappear { setDetailVisible(false, []) }
         // Governor stays DetailVisible across scrub (reading history is independent of live
@@ -356,6 +369,18 @@ struct MomoPanel: View {
         case .live: return "live"
         case .at(let date): return "\(target.rawValue):\(Int(date.timeIntervalSince1970))"
         }
+    }
+
+    /// Re-runs the culprit `.task` when the selected point, target, or timebase changes. A nil
+    /// selection keys to a stable sentinel so the task clears (and doesn't churn).
+    private var culpritTaskKey: String {
+        let base: String
+        switch viewTime {
+        case .live: base = "live"
+        case .at(let date): base = "at:\(Int(date.timeIntervalSince1970))"
+        }
+        let sel = selectedTime.map { Int($0.timeIntervalSince1970) }.map(String.init) ?? "none"
+        return "\(target.rawValue):\(base):\(sel)"
     }
 
     /// Resolve the `.at` window on a background read; no-op (and clears state) while `.live`.
@@ -373,12 +398,41 @@ struct MomoPanel: View {
         }
     }
 
-    /// The detail block — live sample for `.live`, recorded reading for `.at` (with the
-    /// "device was asleep" gap state, OQ5). U11 will replace the historical detail with a
-    /// point-selected culprit list (see chartXSelection note in MetricChart).
+    /// Resolve the culprits for the current selection. `.live` reads the ring synchronously (no
+    /// DB); `.at` reads the per-process side table off-main on the reader pool. Clears when
+    /// nothing is selected. Subsystem follows the clicked graph's target (KTD7).
+    private func loadCulprit() async {
+        guard let selected = selectedTime else { culprit = nil; return }
+        let ts = Int(selected.timeIntervalSince1970)
+        let subsystem = target.subsystem
+        switch viewTime {
+        case .live:
+            // Synchronous off the ring (KTD12 — the live path never touches the DB).
+            let samples = live.ring.recent(300)
+            culprit = CulpritResolver.live(samples: samples, selectedTs: ts, subsystem: subsystem)
+        case .at:
+            guard let dbPool else { culprit = .noData; return }
+            let resolved = await Task.detached(priority: .userInitiated) { () -> CulpritResult in
+                (try? CulpritResolver.historical(
+                    query: HistoryQuery(dbPool: dbPool), selectedTs: ts, subsystem: subsystem))
+                    ?? .noData
+            }.value
+            // Apply only if the selection is still the same (avoid a stale write after a re-pick).
+            if let current = selectedTime, Int(current.timeIntervalSince1970) == ts {
+                culprit = resolved
+            }
+        }
+    }
+
+    /// The detail block. When a graph point is selected (U11), the culprit list for that moment
+    /// replaces the scalar detail (R9 causal drill-down — the flagship "what pegged it" answer).
+    /// Otherwise it falls back to the live sample (`.live`) or recorded reading (`.at`, with the
+    /// "device was asleep" gap state, OQ5).
     @ViewBuilder
     private func detailBody(isHistorical: Bool, sample: Sample?) -> some View {
-        if isHistorical {
+        if let selected = selectedTime, let result = culprit {
+            CulpritView(result: result, target: target, selected: selected)
+        } else if isHistorical {
             if historical?.cursorInGap == true {
                 Text("No data — device was asleep")
                     .font(.callout).foregroundStyle(.secondary)

@@ -86,6 +86,13 @@ struct MetricChart: View {
                     .foregroundStyle(.secondary)
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
+            // U11: a vertical RuleMark at the selected x marks the moment whose culprits the
+            // panel resolves. Works on both the live (static) and scrub (scrollable) charts.
+            if let selected = selection?.wrappedValue {
+                RuleMark(x: .value("Selected", selected))
+                    .foregroundStyle(.primary.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+            }
         }
         .chartYScale(domain: yDomain)
         .chartYAxis {
@@ -98,19 +105,34 @@ struct MetricChart: View {
         }
         .chartXAxis(.hidden)
 
+        // U11: point selection (R9 causal drill-down). `chartXSelection` gives the selected
+        // `Date`; the panel maps it to ts and resolves the responsible processes. Applied on
+        // both paths (selection works on a static chart too) when a binding is supplied.
+        let selectable = applySelection(base)
+
         // Historical (scrub) path: horizontal scroll over the recorded window with a fixed
-        // visible span and a programmatic scroll position (macOS 14+). U11 attaches its
-        // point-selection hook here via `.chartXSelection(value: selection)` — the `selection`
-        // binding is already plumbed through this view; U11 only needs to wire the modifier and
-        // an overlay rule mark, then resolve the selected `Date` to a culprit list.
+        // visible span and a programmatic scroll position (macOS 14+).
         if let visible = scrubVisibleSeconds {
-            base
+            selectable
                 .chartScrollableAxes(.horizontal)
                 .chartXVisibleDomain(length: visible)
                 .chartScrollPosition(x: $scrollPosition)
         } else {
-            // Live path: no scroll, drawingGroup for smoothness (R11/U8).
-            base.drawingGroup()
+            // Live path: no scroll. `drawingGroup()` is dropped here because it rasterizes the
+            // chart into an image layer that swallows the gesture `chartXSelection` needs; the
+            // bounded live window is cheap enough to render directly (R11/U8).
+            selectable
+        }
+    }
+
+    /// Attach `.chartXSelection(value:)` only when a selection binding is supplied (the live
+    /// path with no culprit lookup passes none), so the modifier's generic type stays resolved.
+    @ViewBuilder
+    private func applySelection(_ chart: some View) -> some View {
+        if let selection {
+            chart.chartXSelection(value: selection)
+        } else {
+            chart
         }
     }
 
