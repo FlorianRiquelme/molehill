@@ -12,3 +12,6 @@ xcuserdata/
 
 ## macOS
 .DS_Store
+
+## Claude Code subagent worktrees
+.claude/worktrees/
