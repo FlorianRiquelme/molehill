@@ -1,0 +1,66 @@
+name: Momo
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  bundleIdPrefix: com.florianriquelme
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+
+settings:
+  base:
+    # KTD11: Swift 6 strict concurrency enforced from U1 so the
+    # collection-queue -> main-actor Sample boundary is compiler-checked.
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    # Local, self-run tool (private APIs => not App-Store eligible). Ad-hoc sign to run locally.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+  Momo:
+    type: application
+    platform: macOS
+    sources:
+      - path: Momo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.florianriquelme.momo
+        PRODUCT_NAME: Momo
+        INFOPLIST_FILE: Momo/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Momo/Support/Momo-Bridging-Header.h
+        ENABLE_TESTABILITY: true
+        # Accessory (menu-bar-only) app.
+        LSUIElement: true
+    dependencies:
+      - package: GRDB
+      - sdk: IOKit.framework
+
+  MomoTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: MomoTests
+    dependencies:
+      - target: Momo
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Momo.app/Contents/MacOS/Momo"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        SWIFT_OBJC_BRIDGING_HEADER: Momo/Support/Momo-Bridging-Header.h
+
+schemes:
+  Momo:
+    build:
+      targets:
+        Momo: all
+        MomoTests: [test]
+    test:
+      targets:
+        - MomoTests

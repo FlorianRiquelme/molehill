@@ -1,0 +1,13 @@
+// PrivateAPIs.modulemap
+//
+// Module-map form of the private declarations, kept alongside the bridging header
+// per the plan's file layout. The app target consumes the private symbols through
+// SWIFT_OBJC_BRIDGING_HEADER (Momo-Bridging-Header.h) — the active mechanism — so
+// this module is NOT imported anywhere (importing it as well would double-declare
+// the same C symbols in one translation unit). It documents the module-import
+// alternative should a future target prefer `import PrivateAPIs` over a bridging header.
+module PrivateAPIs {
+    header "Momo-Bridging-Header.h"
+    link "IOKit"
+    export *
+}
