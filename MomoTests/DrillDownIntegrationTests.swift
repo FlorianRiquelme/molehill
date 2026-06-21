@@ -113,4 +113,50 @@ final class DrillDownIntegrationTests: XCTestCase {
         // But cheap menu-bar metrics still flow.
         XCTAssertTrue(samples.contains { $0.cpu != nil })
     }
+
+    // MARK: - Live detail sample (sub-cadence carry-forward — the OQ3 flicker fix)
+
+    /// Per-process attribution is collected only every Nth tick (KTD3 sub-cadence), so `latest`
+    /// carries it on ~1/N ticks. The live detail body must carry the most recent attribution
+    /// forward across the base-tick gap — otherwise the process list flickers back to
+    /// "Collecting data…" 2 of every 3 seconds.
+    @MainActor
+    func testLiveDetailSampleCarriesAttributionAcrossSubCadenceGap() {
+        let ring = RingBuffer()
+        let attr = AttributionSample(bySubsystem: [.cpu: [
+            ProcessAttribution(pid: 1, name: "hot", subsystem: .cpu, value: 0.9, restricted: false)]])
+        // A detail tick (has attribution) followed by two base-only ticks (the sub-cadence gap);
+        // the newest tick has nil attribution, exactly as the governor emits it.
+        ring.receive(Sample(timestamp: Date(timeIntervalSince1970: 100),
+                            cpu: CPUSample(overall: 0.4, perCore: [0.4]), attribution: attr))
+        ring.receive(Sample(timestamp: Date(timeIntervalSince1970: 101), cpu: CPUSample(overall: 0.5, perCore: [0.5])))
+        ring.receive(Sample(timestamp: Date(timeIntervalSince1970: 102), cpu: CPUSample(overall: 0.6, perCore: [0.6])))
+        let live = LiveModel(ring: ring)
+
+        let resolved = PanelData.liveDetailSample(live)
+        XCTAssertEqual(resolved?.attribution?.bySubsystem[.cpu]?.first?.name, "hot",
+                       "attribution carries forward across the sub-cadence gap (no flicker to nil)")
+        XCTAssertEqual(resolved?.cpu?.overall ?? -1, 0.6, accuracy: 0.0001,
+                       "base metrics still come from the newest tick, not the carried-forward one")
+    }
+
+    /// Staleness bound: an attribution reading older than the sub-cadence lookback window (e.g. a
+    /// previous panel session — the ring retains ~30 min) must NOT be shown as live; the body
+    /// correctly falls back to "Collecting data…".
+    @MainActor
+    func testLiveDetailSampleDropsAttributionOlderThanWindow() {
+        let ring = RingBuffer()
+        let attr = AttributionSample(bySubsystem: [.cpu: [
+            ProcessAttribution(pid: 1, name: "old", subsystem: .cpu, value: 0.9, restricted: false)]])
+        ring.receive(Sample(timestamp: Date(timeIntervalSince1970: 100),
+                            cpu: CPUSample(overall: 0.4, perCore: [0.4]), attribution: attr))
+        // More base-only ticks than the lookback window → the old reading ages out.
+        for i in 1...(Cadence.detailSubCadenceFactor * 2 + 2) {
+            ring.receive(Sample(timestamp: Date(timeIntervalSince1970: 100 + Double(i)),
+                                cpu: CPUSample(overall: 0.5, perCore: [0.5])))
+        }
+        let live = LiveModel(ring: ring)
+        XCTAssertNil(PanelData.liveDetailSample(live)?.attribution,
+                     "attribution older than the sub-cadence window is not shown as live")
+    }
 }

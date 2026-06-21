@@ -230,11 +230,25 @@ enum HistoricalResolver {
 /// (historical) branch is resolved by `HistoricalResolver` off the GRDB reader pool — kept
 /// separate from this synchronous live path so a DB read never blocks the live render (KTD12).
 enum PanelData {
-    @MainActor static func sample(_ live: LiveModel, _ viewTime: ViewTime) -> Sample? {
-        switch viewTime {
-        case .live: return live.latest
-        case .at: return nil   // historical detail comes from HistoricalResolver, not the ring.
-        }
+    /// The sample the LIVE detail body renders. Base metrics (cpu/mem/disk/net) come from the
+    /// newest tick, but the sub-cadence detail (per-process attribution, sensors) is carried
+    /// forward from the most recent tick that has it: those collectors run only every Nth tick
+    /// (KTD3 sub-cadence), so binding the detail straight to `latest` flickers the process/sensor
+    /// lists back to "Collecting data…" on the N-1 base ticks (OQ3). Bounded to the last few ticks
+    /// so a reading from an earlier panel session (the ring retains ~30 min) is never shown as
+    /// live — once nothing is recent the body correctly falls back to "Collecting data…".
+    /// Returns nil only when the ring is empty.
+    @MainActor static func liveDetailSample(_ live: LiveModel) -> Sample? {
+        // Detail lands every `detailSubCadenceFactor` ticks; look back two cycles so an occasional
+        // coalesced/missed detail tick still resolves without leaking a stale prior-session value.
+        let window = live.ring.recent(Cadence.detailSubCadenceFactor * 2)
+        guard let latest = window.last else { return nil }
+        return Sample(
+            timestamp: latest.timestamp,
+            cpu: latest.cpu, memory: latest.memory, disk: latest.disk, network: latest.network,
+            sensors: latest.sensors ?? window.reversed().lazy.compactMap(\.sensors).first,
+            attribution: latest.attribution ?? window.reversed().lazy.compactMap(\.attribution).first,
+            context: latest.context)
     }
 
     /// Recent series for `target` from the live ring (raw per-tick). `.at` returns nothing here —
@@ -302,7 +316,7 @@ struct MomoPanel: View {
         let _ = live.tick
         let isHistorical = { if case .at = viewTime { return true }; return false }()
         // Live path stays synchronous off the ring; historical comes from `.task`-loaded state.
-        let sample = isHistorical ? nil : PanelData.sample(live, viewTime)
+        let sample = isHistorical ? nil : PanelData.liveDetailSample(live)
         let points = isHistorical
             ? (historical?.points ?? [])
             : PanelData.series(live, viewTime, target)
