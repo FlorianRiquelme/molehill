@@ -1,7 +1,7 @@
 ---
 title: "feat: macOS Menu-Bar System Monitor (Momo)"
 type: feat
-status: active
+status: completed
 date: 2026-06-19
 deepened: 2026-06-19
 origin: docs/brainstorms/2026-06-19-macos-system-monitor-requirements.md
