@@ -50,7 +50,11 @@ enum Schema {
                         fan_max_avg       REAL,
                         fan_max_max       REAL,
                         thermal_max       REAL,
-                        fg_app            TEXT
+                        fg_app            TEXT,
+                        -- count of attribution samples that contributed to this bucket
+                        -- (KTD3 sub-cadence): the per-process `value` denominator, so a
+                        -- sustained process is not deflated by the attribution sub-cadence.
+                        proc_n            INTEGER NOT NULL DEFAULT 0
                     ) WITHOUT ROWID
                     """)
             }

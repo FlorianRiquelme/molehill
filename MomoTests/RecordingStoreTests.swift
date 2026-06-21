@@ -93,23 +93,41 @@ final class RecordingStoreTests: XCTestCase {
         }
     }
 
-    // MARK: - Per-process ingest end-to-end (full-bucket denominator + value_max).
+    // MARK: - Per-process ingest end-to-end (attribution-sample denominator + value_max).
 
     func testPerProcessIngestDenominatorAndPeak() throws {
         let store = try makeStore(); defer { cleanup(store) }
-        // pid 42 appears in 10 of 60 1s ticks in minute 0 at value 0.6.
+        // Realistic KTD3 sub-cadence: attribution is sampled only every 3rd 1s tick (20 of
+        // 60 ticks in minute 0). pid 42 is pegged at 0.8 in EVERY attribution sample, so its
+        // rolled-up 1m value must be the true sustained 0.8 — NOT deflated to 0.8/3 by the
+        // sub-cadence. pid 7 is present in only half the samples -> diluted to 0.4.
+        var attributionSamples = 0
         for i in 0..<60 {
-            let procs: [Subsystem: [ProcessAttribution]] = (i < 10)
-                ? [.cpu: [ProcessAttribution(pid: 42, name: "X", subsystem: .cpu, value: 0.6, restricted: false)]]
-                : [:]
-            store.receive(sample(at: i, cpu: 0.5, procs: procs))
+            var bySub: [Subsystem: [ProcessAttribution]] = [:]
+            if i % 3 == 0 {   // attribution sub-cadence tick
+                attributionSamples += 1
+                var rows = [ProcessAttribution(pid: 42, name: "Pegged", subsystem: .cpu, value: 0.8, restricted: false)]
+                if attributionSamples % 2 == 0 {   // pid 7 in half the samples
+                    rows.append(ProcessAttribution(pid: 7, name: "Half", subsystem: .cpu, value: 0.8, restricted: false))
+                }
+                bySub = [.cpu: rows]
+            }
+            store.receive(sample(at: i, cpu: 0.5, procs: bySub))
         }
         store.receive(sample(at: 60, cpu: 0.0))   // rollover -> flush minute 0 + cascade
         store.flushPending()
+        XCTAssertEqual(attributionSamples, 20)
         try store.dbPool.read { db in
-            let p = try RowStore.procs(in: Tier.m1.procTable!, from: 0, to: 60, db).first { $0.pid == 42 }!
-            XCTAssertEqual(p.value, 0.6 * 10 / 60, accuracy: 1e-9)
-            XCTAssertEqual(p.valueMax, 0.6, accuracy: 1e-9)
+            // proc_n on the 1m scalar row = total attribution samples in the minute.
+            let m = try RowStore.scalars(in: Tier.m1.table, from: 0, to: 60, db)[0]
+            XCTAssertEqual(m.procN, 20, "stored proc_n = attribution-sample count")
+
+            let pegged = try RowStore.procs(in: Tier.m1.procTable!, from: 0, to: 60, db).first { $0.pid == 42 }!
+            XCTAssertEqual(pegged.value, 0.8, accuracy: 1e-9, "sustained -> true value, not deflated by sub-cadence")
+            XCTAssertEqual(pegged.valueMax, 0.8, accuracy: 1e-9)
+
+            let half = try RowStore.procs(in: Tier.m1.procTable!, from: 0, to: 60, db).first { $0.pid == 7 }!
+            XCTAssertEqual(half.value, 0.8 * 10 / 20, accuracy: 1e-9, "present in half the samples -> diluted to 0.4")
         }
     }
 

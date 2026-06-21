@@ -34,6 +34,9 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
     private var scalarObs: [ScalarObservation] = []
     private var procObs: [ProcObservation] = []
     private var tickCount = 0
+    /// Ticks in this bucket that carried attribution (KTD3 sub-cadence). The per-process
+    /// `value` denominator — attribution is sampled every Nth tick, so this is < tickCount.
+    private var attributionTickCount = 0
 
     /// Minute (1m bucket start) of the most recently flushed 1s bucket. The rollup cascade is
     /// driven event-driven on coarser-boundary completion (KTD2) — it runs only when a flush
@@ -122,6 +125,7 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
         scalarObs.append(ScalarObservation(sample))
         procObs.append(contentsOf: ProcObservation.from(sample))
         tickCount += 1
+        if sample.attribution != nil { attributionTickCount += 1 }
 
         // Advance clock companions only for accepted-forward samples; a slew keeps the prior
         // companions so a subsequent real-forward sample is judged against the true last ts.
@@ -136,6 +140,7 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
         scalarObs.removeAll(keepingCapacity: true)
         procObs.removeAll(keepingCapacity: true)
         tickCount = 0
+        attributionTickCount = 0
     }
 
     /// Flush the current buffer to samples_1s, then cascade + prune. Whole-row replace from
@@ -143,7 +148,9 @@ final class RecordingStore: SampleReceiver, @unchecked Sendable {
     private func flushCurrentLocked() {
         guard let ts = bucketTs, tickCount > 0 else { return }
         let scalar = aggregateScalars(ts: ts, scalarObs)
-        let procs = aggregateProcs(ts: ts, bucketTickCount: tickCount, procObs)
+        // Per-process denominator is the attribution-sample count (KTD3 sub-cadence), NOT the
+        // full tick count; aggregateScalars already set scalar.procN == attributionTickCount.
+        let procs = aggregateProcs(ts: ts, attributionSampleCount: attributionTickCount, procObs)
         let now = lastWallTs ?? ts
 
         do {

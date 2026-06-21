@@ -81,16 +81,28 @@ final class RollupTests: XCTestCase {
 
     // MARK: - Pure: per-process aggregation (KTD4a)
 
-    func testPerProcessFullBucketDenominatorAndPeak() {
-        // pid present in 10 of 60 ticks at value 0.6; absent ticks count as 0.
-        var obs: [ProcObservation] = []
-        for _ in 0..<10 {
-            obs.append(ProcObservation(subsystem: "cpu", pid: 42, name: "X", value: 0.6))
+    func testPerProcessSampleCountDenominatorAndPeak() {
+        // Denominator is the attribution-SAMPLE count (KTD3 sub-cadence), not the tick count.
+        // Sustained: pid present in ALL 20 attribution samples at 0.8 -> value == 0.8.
+        var sustained: [ProcObservation] = []
+        for _ in 0..<20 {
+            sustained.append(ProcObservation(subsystem: "cpu", pid: 42, name: "X", value: 0.8))
         }
-        let rows = aggregateProcs(ts: 0, bucketTickCount: 60, obs)
-        let x = rows.first { $0.pid == 42 }!
-        XCTAssertEqual(x.value, 0.6 * 10 / 60, accuracy: 1e-9)   // full-bucket denominator
-        XCTAssertEqual(x.valueMax, 0.6, accuracy: 1e-9)          // peak == tick peak
+        let sRows = aggregateProcs(ts: 0, attributionSampleCount: 20, sustained)
+        let s = sRows.first { $0.pid == 42 }!
+        XCTAssertEqual(s.value, 0.8, accuracy: 1e-9, "present in every sample -> true value, not deflated")
+        XCTAssertEqual(s.valueMax, 0.8, accuracy: 1e-9)
+
+        // Partial: present in 10 of 20 attribution samples at 0.8 -> diluted across the SAMPLE
+        // count (not the tick count): 0.8 * 10 / 20 == 0.4.
+        var partial: [ProcObservation] = []
+        for _ in 0..<10 {
+            partial.append(ProcObservation(subsystem: "cpu", pid: 7, name: "Y", value: 0.8))
+        }
+        let pRows = aggregateProcs(ts: 0, attributionSampleCount: 20, partial)
+        let p = pRows.first { $0.pid == 7 }!
+        XCTAssertEqual(p.value, 0.8 * 10 / 20, accuracy: 1e-9)
+        XCTAssertEqual(p.valueMax, 0.8, accuracy: 1e-9)
     }
 
     func testPidReuseProducesTwoDistinctRows() {
@@ -99,7 +111,7 @@ final class RollupTests: XCTestCase {
             ProcObservation(subsystem: "cpu", pid: 7, name: "Old", value: 0.4),
             ProcObservation(subsystem: "cpu", pid: 7, name: "New", value: 0.5),
         ]
-        let rows = aggregateProcs(ts: 0, bucketTickCount: 1, obs).filter { $0.pid == 7 }
+        let rows = aggregateProcs(ts: 0, attributionSampleCount: 1, obs).filter { $0.pid == 7 }
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(Set(rows.map(\.name)), ["Old", "New"])
     }
@@ -115,7 +127,7 @@ final class RollupTests: XCTestCase {
         // filler pids with middling values
         for p in 3...10 { obs.append(ProcObservation(subsystem: "cpu", pid: Int64(p), name: "F\(p)", value: 0.3)) }
 
-        let rows = aggregateProcs(ts: 0, bucketTickCount: 10, obs, topN: 2)
+        let rows = aggregateProcs(ts: 0, attributionSampleCount: 10, obs, topN: 2)
         let names = Set(rows.map(\.name))
         XCTAssertTrue(names.contains("Sustained"), "top-by-value must survive")
         XCTAssertTrue(names.contains("Spiky"), "top-by-value_max must survive")
@@ -143,6 +155,7 @@ final class RollupTests: XCTestCase {
             for i in 0..<60 {
                 var s = ScalarRow(ts: i)
                 s.cpuAvg = Double(i) / 100; s.cpuMax = Double(i) / 100
+                s.procN = 1   // one attribution sample per 1s bucket
                 try RowStore.upsert(s, into: Tier.s1.table, db)
                 let p = ProcRow(ts: i, subsystem: "cpu", pid: 5, name: "Busy", value: 0.5, valueMax: 0.5)
                 try RowStore.upsert(p, into: Tier.s1.procTable!, db)
@@ -155,9 +168,45 @@ final class RollupTests: XCTestCase {
             let m = try RowStore.scalars(in: Tier.m1.table, from: 0, to: 60, db)
             XCTAssertEqual(m.count, 1)
             XCTAssertEqual(m[0].cpuMax!, 0.59, accuracy: 1e-9)
+            XCTAssertEqual(m[0].procN, 60)   // proc_n = sum of finer proc_n
             let procs = try RowStore.procs(in: Tier.m1.procTable!, from: 0, to: 60, db)
             XCTAssertEqual(procs.count, 1)
             XCTAssertEqual(procs[0].name, "Busy")   // names KEPT at 1m
+            // Present in all 60 attribution samples at 0.5 -> true value 0.5 (denominator = 60).
+            XCTAssertEqual(procs[0].value, 0.5, accuracy: 1e-9)
+        }
+    }
+
+    // MARK: - DB-backed: sub-cadence does NOT deflate a sustained process (regression)
+
+    func testSubCadenceDoesNotDeflateSustainedProcess() throws {
+        // Attribution runs on a slower sub-cadence: only every 3rd 1s bucket carries a proc
+        // row (20 samples in the minute). A process pegged at 0.8 in EVERY attribution sample
+        // must roll up to 1m value == 0.8, NOT 0.8/3.
+        let store = try RecordingStore.temporary()
+        defer { try? FileManager.default.removeItem(atPath: store.dbPool.path) }
+
+        try store.dbPool.write { db in
+            for i in 0..<60 {
+                var s = ScalarRow(ts: i)
+                s.cpuAvg = 0.8; s.cpuMax = 0.8
+                let hasAttribution = (i % 3 == 0)   // 20 of 60 ticks
+                s.procN = hasAttribution ? 1 : 0
+                try RowStore.upsert(s, into: Tier.s1.table, db)
+                if hasAttribution {
+                    let p = ProcRow(ts: i, subsystem: "cpu", pid: 99, name: "Pegged", value: 0.8, valueMax: 0.8)
+                    try RowStore.upsert(p, into: Tier.s1.procTable!, db)
+                }
+            }
+            _ = try Rollup.cascade(db, from: .s1, now: 120)
+        }
+
+        try store.dbPool.read { db in
+            let m = try RowStore.scalars(in: Tier.m1.table, from: 0, to: 60, db)
+            XCTAssertEqual(m[0].procN, 20, "proc_n = number of attribution samples in the minute")
+            let p = try RowStore.procs(in: Tier.m1.procTable!, from: 0, to: 60, db).first { $0.pid == 99 }!
+            XCTAssertEqual(p.value, 0.8, accuracy: 1e-9, "sustained process NOT deflated by sub-cadence factor")
+            XCTAssertEqual(p.valueMax, 0.8, accuracy: 1e-9)
         }
     }
 

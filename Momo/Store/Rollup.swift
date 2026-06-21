@@ -59,10 +59,14 @@ enum Rollup {
 
             // Per-process: names kept at 1m, dropped at 1h (no proc_1h table — KTD4).
             if let coarseProc = coarser.procTable, let finerProc = tier.procTable {
+                // The per-process denominator is the total attribution samples across the
+                // coarse window = sum of the finer rows' recorded `procN` (KTD3 sub-cadence),
+                // NOT the finer sub-bucket count — so a sustained process is not deflated.
+                let attributionSamples = finerScalars.reduce(0) { $0 + $1.procN }
                 try rollupProcs(db,
                     finerProcTable: finerProc, coarseProcTable: coarseProc,
                     from: cstart, to: cend, coarseStart: cstart,
-                    finerWidth: fineW)
+                    attributionSamples: attributionSamples)
             }
             touched.append(cstart)
         }
@@ -88,32 +92,30 @@ enum Rollup {
         return starts
     }
 
-    /// Roll finer per-process rows in [lo,hi) into one coarse bucket (KTD4a). The full-bucket
-    /// denominator is the coarse window's tick count (coarseWidth / finerWidth), so a process
-    /// present in only some finer buckets is correctly diluted.
+    /// Roll finer per-process rows in [lo,hi) into one coarse bucket (KTD4a). The denominator
+    /// is `attributionSamples` — the total number of attribution samples recorded across the
+    /// coarse window (sum of the finer scalar rows' `proc_n`).
     private static func rollupProcs(
         _ db: Database,
         finerProcTable: String, coarseProcTable: String,
-        from lo: Int, to hi: Int, coarseStart: Int, finerWidth: Int
+        from lo: Int, to hi: Int, coarseStart: Int, attributionSamples: Int
     ) throws {
         let finerRows = try RowStore.procs(in: finerProcTable, from: lo, to: hi, db)
         guard !finerRows.isEmpty else { return }
 
-        let subBuckets = (hi - lo) / finerWidth   // e.g. 60 finer buckets per coarse bucket
-
-        // Coarse `value` = unweighted mean of the finer averages over the FULL coarse window
-        // (denominator = number of finer sub-buckets, KTD4a full-bucket denominator), so a
-        // process present in only some finer buckets is correctly diluted. For full buckets
-        // this equals the tick-weighted mean; partial finer buckets differ only to rounding,
-        // matching the scalar rollup policy. `value_max` = max of the finer `value_max`.
+        // Coarse `value` = sum(finer per-process averages) / attributionSamples. The finer
+        // `value` is already sum(per-tick value)/attributionSamples_of_that_finer_bucket, so
+        // summing the finer values and dividing by the TOTAL attribution-sample count across
+        // the window recovers the tick-weighted mean over the samples that actually ran
+        // (KTD3 sub-cadence). `value_max` = max of the finer `value_max`.
         //
-        // KNOWN LIMITATION (see Residual Review Findings): per-process attribution runs on a
-        // slower sub-cadence than the scalar metrics (KTD3), so at detail cadence only ~1/N of
-        // the finer sub-buckets carry proc rows. Dividing by the full `subBuckets` count
-        // therefore deflates a sustained process's `value` by the sub-cadence factor N. The
-        // ranking is preserved (uniform scaling) and `value_max` is exact; the correct fix
-        // (dividing by the attribution-sample count) needs that count recorded per bucket and is
-        // deferred so the irreversible schema decision isn't rushed.
+        // The denominator is the recorded attribution-sample count, NOT the finer sub-bucket
+        // count: per-process attribution runs on a slower sub-cadence than the scalar metrics
+        // (KTD3), so only ~1/N of the sub-buckets carry proc rows. Dividing by the recorded
+        // sample count (carried per bucket in `proc_n`) means a process present in EVERY
+        // attribution sample reports its true sustained value, undeflated by the factor N;
+        // a process present in half the samples is diluted to half. `value_max` is exact.
+        let denominator = Swift.max(attributionSamples, 1)
         struct Key: Hashable { let subsystem: String; let pid: Int64; let name: String }
         var sums: [Key: Double] = [:]
         var peaks: [Key: Double] = [:]
@@ -127,7 +129,7 @@ enum Rollup {
         for (k, sum) in sums {
             let row = ProcRow(
                 ts: coarseStart, subsystem: k.subsystem, pid: k.pid, name: k.name,
-                value: sum / Double(subBuckets), valueMax: peaks[k] ?? 0)
+                value: sum / Double(denominator), valueMax: peaks[k] ?? 0)
             bySubsystem[k.subsystem, default: []].append(row)
         }
         for (_, rows) in bySubsystem {

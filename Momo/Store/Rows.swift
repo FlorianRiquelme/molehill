@@ -111,6 +111,12 @@ struct ScalarRow: Equatable {
     var thermalMax: Double?      // peak thermal state (raw enum value)
 
     var fgApp: String?           // foreground app — dropped at the 1h tier (KTD4)
+
+    /// Count of attribution samples that contributed to this bucket (KTD3 sub-cadence).
+    /// This is the per-process `value` denominator (not the scalar tick count), because
+    /// attribution is sampled on a slower sub-cadence than scalar metrics. A coarser tier's
+    /// `procN` is the SUM of its finer rows' `procN` (total attribution samples in the window).
+    var procN: Int = 0
 }
 
 /// One per-process attribution row, keyed by (ts, subsystem, pid) — KTD4a. `value` is the
@@ -146,7 +152,13 @@ struct ScalarObservation {
     var thermal: Double?
     var fgApp: String?
 
+    /// Whether this tick carried per-process attribution (KTD3 sub-cadence). Attribution
+    /// runs every Nth tick, so this is true on only ~1/N of the ticks in a bucket; counting
+    /// the true ones gives the per-process `value` denominator (vs. the full tick count).
+    var hasAttribution: Bool = false
+
     init(_ sample: Sample) {
+        hasAttribution = (sample.attribution != nil)
         cpu = sample.cpu?.overall
         if let m = sample.memory {
             memUsed = Double(m.usedBytes)
@@ -252,7 +264,8 @@ func aggregateScalars(ts bucketTs: Int, _ obs: [ScalarObservation]) -> ScalarRow
         tempMaxAvg: temp.avg, tempMaxMax: temp.max,
         fanMaxAvg: fan.avg, fanMaxMax: fan.max,
         thermalMax: peak(obs.map(\.thermal)),
-        fgApp: lastNonNilString(obs.map(\.fgApp))
+        fgApp: lastNonNilString(obs.map(\.fgApp)),
+        procN: obs.filter(\.hasAttribution).count
     )
 }
 
@@ -284,7 +297,9 @@ func rollupScalars(ts bucketTs: Int, _ finer: [ScalarRow], dropForeground: Bool)
         tempMaxAvg: avgOf(\.tempMaxAvg), tempMaxMax: maxOf(\.tempMaxMax),
         fanMaxAvg: avgOf(\.fanMaxAvg), fanMaxMax: maxOf(\.fanMaxMax),
         thermalMax: maxOf(\.thermalMax),
-        fgApp: dropForeground ? nil : finer.compactMap(\.fgApp).last
+        fgApp: dropForeground ? nil : finer.compactMap(\.fgApp).last,
+        // Total attribution samples across the window = the coarse per-process denominator.
+        procN: finer.reduce(0) { $0 + $1.procN }
     )
 }
 
@@ -296,19 +311,22 @@ let perBucketTopN = 5
 
 /// Aggregate one bucket's per-tick per-process observations into per-bucket rows (KTD4a).
 ///
-/// - `bucketTickCount` is the FULL bucket tick count (the denominator): ticks where a
-///   process was absent from top-N count as 0, so a brief spike does not inflate `value`.
+/// - `attributionSampleCount` is the number of ticks in the bucket where attribution was
+///   actually sampled (KTD3 sub-cadence) — the per-process `value` denominator. Ticks where
+///   a process was absent from top-N (but attribution ran) count as 0, so a brief spike does
+///   not inflate `value`; a process present in every attribution sample reports its true
+///   value, undeflated by the sub-cadence factor.
 /// - A `(pid, name)` change within the bucket is TWO distinct keys, never summed.
-/// - `value` = sum(per-tick values) / bucketTickCount; `valueMax` = per-process tick peak.
+/// - `value` = sum(per-tick values) / attributionSampleCount; `valueMax` = per-process peak.
 /// - Survivors per subsystem = union of top-N by `valueMax` and top-N by `value`, deduped,
 ///   bounded to ~2N, ties broken by `valueMax`.
 func aggregateProcs(
     ts bucketTs: Int,
-    bucketTickCount: Int,
+    attributionSampleCount: Int,
     _ obs: [ProcObservation],
     topN: Int = perBucketTopN
 ) -> [ProcRow] {
-    guard bucketTickCount > 0 else { return [] }
+    let denominator = Swift.max(attributionSampleCount, 1)
 
     struct Key: Hashable { let subsystem: String; let pid: Int64; let name: String }
     var sums: [Key: Double] = [:]
@@ -327,7 +345,7 @@ func aggregateProcs(
             subsystem: k.subsystem,
             pid: k.pid,
             name: k.name,
-            value: sum / Double(bucketTickCount),
+            value: sum / Double(denominator),
             valueMax: peaks[k] ?? 0
         )
         bySubsystem[k.subsystem, default: []].append(row)
@@ -375,7 +393,7 @@ private let scalarColumns = [
     "disk_write_avg", "disk_write_max",
     "net_rx_avg", "net_rx_max", "net_tx_avg", "net_tx_max",
     "temp_max_avg", "temp_max_max", "fan_max_avg", "fan_max_max",
-    "thermal_max", "fg_app",
+    "thermal_max", "fg_app", "proc_n",
 ]
 
 extension ScalarRow {
@@ -388,7 +406,7 @@ extension ScalarRow {
             diskWriteAvg, diskWriteMax,
             netRxAvg, netRxMax, netTxAvg, netTxMax,
             tempMaxAvg, tempMaxMax, fanMaxAvg, fanMaxMax,
-            thermalMax, fgApp,
+            thermalMax, fgApp, procN,
         ]
     }
 
@@ -406,6 +424,7 @@ extension ScalarRow {
         tempMaxAvg = row["temp_max_avg"]; tempMaxMax = row["temp_max_max"]
         fanMaxAvg = row["fan_max_avg"]; fanMaxMax = row["fan_max_max"]
         thermalMax = row["thermal_max"]; fgApp = row["fg_app"]
+        procN = row["proc_n"] ?? 0
     }
 }
 
